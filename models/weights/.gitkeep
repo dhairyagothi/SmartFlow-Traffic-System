@@ -1,0 +1,2 @@
+# This file ensures that the weights directory is tracked by Git
+# The directory will be used to store YOLOv8 model weights 
