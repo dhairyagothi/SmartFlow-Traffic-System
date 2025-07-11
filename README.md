@@ -2,6 +2,17 @@
 
 An AI-powered traffic signal management system that uses computer vision and machine learning to optimize traffic flow in real-time.
 
+## Youtube Video : https://youtu.be/UpaVo8AtwxQ
+
+
+##
+
+![image](https://github.com/user-attachments/assets/644d2073-e364-4d3b-a2ef-556f313cf138)
+![Screenshot 2025-06-08 233408](https://github.com/user-attachments/assets/3ed20c62-4ca3-4a1b-befc-38b76ee1b49f)
+![Screenshot 2025-06-08 233425](https://github.com/user-attachments/assets/734d2188-a3fd-445e-90eb-a8e1969f8774)
+![Screenshot 2025-06-08 233441](https://github.com/user-attachments/assets/8662339f-e4b6-41af-a925-5341264f07e9)
+
+
 ## Features
 
 - Real-time traffic monitoring and analysis
