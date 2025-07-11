@@ -380,7 +380,7 @@ def update_ui():
             image_containers[i].image(
                 st.session_state[f"annotated_image_{i}"],
                 caption=f"Lane {lane_num}: {st.session_state.traffic_states[lane_key]['vehicles']} vehicles detected",
-                use_column_width=True
+                use_container_width=True
             )
             vehicle_metrics[i].metric(
                 f"Vehicles in Lane {lane_num}",

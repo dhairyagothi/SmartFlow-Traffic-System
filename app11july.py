@@ -481,7 +481,7 @@ def update_lane_priority(force_switch=False):
         
         # Log priority reason
         if next_priority_lane_data['has_emergency']:
-            logger.info(f" EMERGENCY: New cycle - Lane {next_priority_lane} has {next_priority_lane_data['emergency_vehicles']} emergency vehicle(s)")
+            logger.info(f"� EMERGENCY: New cycle - Lane {next_priority_lane} has {next_priority_lane_data['emergency_vehicles']} emergency vehicle(s)")
         elif next_priority_lane_data['needs_priority']:
             logger.info(f"⏰ TIME PRIORITY: New cycle - Lane {next_priority_lane} red time <= 15s ({RED_TIME - next_priority_lane_data['red_time_elapsed']}s remaining)")
         else:
@@ -498,7 +498,7 @@ def update_lane_priority(force_switch=False):
         
         # Log priority reason
         if next_priority_lane_data['has_emergency']:
-            logger.info(f" EMERGENCY: Switched to Lane {next_priority_lane} - {next_priority_lane_data['emergency_vehicles']} emergency vehicle(s) detected!")
+            logger.info(f"� EMERGENCY: Switched to Lane {next_priority_lane} - {next_priority_lane_data['emergency_vehicles']} emergency vehicle(s) detected!")
         elif next_priority_lane_data['needs_priority']:
             logger.info(f"⏰ TIME PRIORITY: Switched to Lane {next_priority_lane} - red time <= 15s ({RED_TIME - next_priority_lane_data['red_time_elapsed']}s remaining)")
         else:

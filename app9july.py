@@ -48,16 +48,9 @@ if "priority_order" not in st.session_state:
 
 if 'traffic_data' not in st.session_state:
     st.session_state.traffic_data = {
-        f'lane{i+1}': {'vehicles': 0, 'emergency_vehicles': 0, 'file': None, 'file_type': None}
+        f'lane{i+1}': {'vehicles': 0, 'file': None, 'file_type': None}
         for i in range(LANE_COUNT)
     }
-
-# Fix for existing session state that might not have emergency_vehicles
-for i in range(LANE_COUNT):
-    lane_key = f'lane{i+1}'
-    if lane_key in st.session_state.traffic_data:
-        if 'emergency_vehicles' not in st.session_state.traffic_data[lane_key]:
-            st.session_state.traffic_data[lane_key]['emergency_vehicles'] = 0
 
 if 'priority_lane' not in st.session_state:
     st.session_state.priority_lane = None
@@ -73,26 +66,7 @@ if 'green_timer_active' not in st.session_state:
 if 'cycle_lanes_used' not in st.session_state:
     st.session_state.cycle_lanes_used = set()
 
-if 'in_yellow_phase' not in st.session_state:
-    st.session_state.in_yellow_phase = False
-
-if 'last_yellow_analysis' not in st.session_state:
-    st.session_state.last_yellow_analysis = 0
-
-if 'video_frame_positions' not in st.session_state:
-    st.session_state.video_frame_positions = {
-        f'lane{i+1}': 0 for i in range(LANE_COUNT)
-    }
-
-if 'video_total_frames' not in st.session_state:
-    st.session_state.video_total_frames = {
-        f'lane{i+1}': 0 for i in range(LANE_COUNT)
-    }
-
 VEHICLE_CLASSES = {1, 2, 3, 5, 7}  # bicycle, car, motorcycle, bus, truck
-# YOLOv8s COCO classes - we'll detect by name since ambulance isn't a specific class
-# We'll look for 'truck', 'bus' or any vehicle with 'ambulance' in detection
-EMERGENCY_CLASSES = set()  # Will detect by name matching
 
 @st.cache_resource
 def load_model():
@@ -118,9 +92,7 @@ def detect_vehicles(image_array, model):
     try:
         results = model(image_array, verbose=False)[0]
         count = 0
-        emergency_count = 0
         annotated_img = image_array.copy()
-        
         for box in results.boxes:
             cls_id = int(box.cls[0])
             if cls_id in VEHICLE_CLASSES:
@@ -132,59 +104,31 @@ def detect_vehicles(image_array, model):
                 label = f"{cls_name} {conf:.2f}"
                 cv2.putText(annotated_img, label, (x1, y1-10), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
-                
-                # Backend: Check for emergency vehicles (not shown in frontend)
-                # Look for keywords that might indicate emergency vehicles
-                emergency_keywords = ['ambulance', 'emergency', 'rescue', 'fire truck', 'police']
-                is_emergency = any(keyword in cls_name.lower() for keyword in emergency_keywords)
-                
-                # For testing: uncomment next line to treat trucks/buses as emergency vehicles
-                # is_emergency = is_emergency or cls_name.lower() in ['truck', 'bus']
-                
-                if is_emergency:
-                    emergency_count += 1
-                    logger.info(f"Emergency vehicle detected: {cls_name}")
-        
-        return count, emergency_count, annotated_img
+        return count, annotated_img
     except Exception as e:
         logger.error(f"Error in detection: {str(e)}")
-        return 0, 0, image_array
+        return 0, image_array
 
-def extract_video_frame(video_path, frame_position=None, advance_frames=False):
+def extract_video_frame(video_path):
     try:
         cap = cv2.VideoCapture(video_path)
         if not cap.isOpened():
             logger.error(f"Could not open video: {video_path}")
-            return None, 0, 0
-        
+            return None
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        
         if total_frames > 0:
-            if frame_position is not None:
-                if advance_frames:
-                    # For yellow phase analysis - advance significantly to get fresh content
-                    # Advance by 2-3 seconds worth of frames (fps * 2.5)
-                    frame_advance = int(fps * 2.5) if fps > 0 else 60
-                    frame_idx = (frame_position + frame_advance) % total_frames
-                else:
-                    # Use specific frame position
-                    frame_idx = min(frame_position, total_frames - 1)
-            else:
-                # Random frame for initial preview
-                frame_idx = np.random.randint(0, max(1, int(total_frames/3)))
-            
+            frame_idx = np.random.randint(0, max(1, int(total_frames/2)))
             cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
             ret, frame = cap.read()
             cap.release()
             if ret:
                 frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                return frame_rgb, frame_idx, total_frames
+                return frame_rgb
         cap.release()
-        return None, 0, total_frames
+        return None
     except Exception as e:
         logger.error(f"Error extracting frame: {str(e)}")
-        return None, 0, 0
+        return None
 
 def find_arduino_port():
     ports = list(serial.tools.list_ports.comports())
@@ -264,12 +208,11 @@ def send_light_signal(arduino, lane, color):
         logger.error(f"Error sending {color.upper()} command to Arduino: {str(e)}")
     return False
 
-def analyze_traffic_and_update_priority(yellow_phase_analysis=False):
+def analyze_traffic_and_update_priority():
     model = load_model()
     if not model:
         st.error("Failed to load detection model. Please check your installation.")
         return
-    
     for i in range(LANE_COUNT):
         lane_key = f'lane{i+1}'
         lane_data = st.session_state.traffic_data[lane_key]
@@ -285,44 +228,16 @@ def analyze_traffic_and_update_priority(yellow_phase_analysis=False):
                 elif file_type == "video":
                     video_path = st.session_state.temp_video_paths[lane_key]
                     if video_path:
-                        if yellow_phase_analysis:
-                            # During yellow phase, advance to next frame for fresh analysis
-                            current_pos = st.session_state.video_frame_positions.get(lane_key, 0)
-                            frame_result = extract_video_frame(video_path, current_pos, advance_frames=True)
-                            if frame_result and len(frame_result) == 3:
-                                img_array, new_pos, total_frames = frame_result
-                                # Update position and total frames for this lane
-                                st.session_state.video_frame_positions[lane_key] = new_pos
-                                st.session_state.video_total_frames[lane_key] = total_frames
-                                logger.info(f"Yellow Phase: Lane {i+1} - Advanced to frame {new_pos}/{total_frames}")
-                            else:
-                                logger.warning(f"Failed to extract yellow phase frame for Lane {i+1}")
-                        else:
-                            # Initial analysis - use random frame
-                            frame_result = extract_video_frame(video_path)
-                            if frame_result and len(frame_result) == 3:
-                                img_array, pos, total_frames = frame_result
-                                st.session_state.video_frame_positions[lane_key] = pos
-                                st.session_state.video_total_frames[lane_key] = total_frames
-                
+                        img_array = extract_video_frame(video_path)
                 if img_array is not None:
-                    count, emergency_count, annotated_img = detect_vehicles(img_array, model)
+                    count, annotated_img = detect_vehicles(img_array, model)
                     st.session_state.traffic_data[lane_key]['vehicles'] = count
-                    st.session_state.traffic_data[lane_key]['emergency_vehicles'] = emergency_count
                     st.session_state[f"annotated_image_{i}"] = annotated_img
-                    
-                    if yellow_phase_analysis:
-                        current_frame = st.session_state.video_frame_positions.get(lane_key, 0)
-                        total_frames = st.session_state.video_total_frames.get(lane_key, 0)
-                        logger.info(f"Lane {i+1}: Detected {count} vehicles, {emergency_count} emergency vehicles (Yellow Phase - Frame {current_frame}/{total_frames})")
-                    else:
-                        logger.info(f"Lane {i+1}: Detected {count} vehicles, {emergency_count} emergency vehicles (Initial Analysis)")
+                    logger.info(f"Lane {i+1}: Detected {count} vehicles")
             except Exception as e:
                 logger.error(f"Error processing Lane {i+1}: {str(e)}")
-    
     # Update lane priorities after detection
-    if not yellow_phase_analysis:
-        update_lane_priority(force_switch=True)
+    update_lane_priority(force_switch=True)
 
 def cleanup_temp_files():
     for lane_key, path in st.session_state.temp_video_paths.items():
@@ -376,18 +291,13 @@ with st.container():
                             st.session_state.traffic_data[lane_key]['file_type'] = "video"
                             st.session_state.temp_video_paths[lane_key] = video_path
                             st.video(video_path)
-                            # Extract preview frame and store position
-                            frame_result = extract_video_frame(video_path)
-                            if frame_result and len(frame_result) == 3:
-                                preview_frame, frame_pos, total_frames = frame_result
-                                st.session_state.video_frame_positions[lane_key] = frame_pos
-                                st.session_state.video_total_frames[lane_key] = total_frames
-                                if preview_frame is not None:
-                                    st.image(
-                                        preview_frame,
-                                        caption=f"Preview Frame from Lane {lane_num} Video (Frame {frame_pos}/{total_frames})",
-                                        use_container_width=True
-                                    )
+                            preview_frame = extract_video_frame(video_path)
+                            if preview_frame is not None:
+                                st.image(
+                                    preview_frame,
+                                    caption=f"Preview Frame from Lane {lane_num} Video",
+                                    use_container_width=True
+                                )
                         else:
                             st.error(f"Failed to process video for Lane {lane_num}")
 
@@ -416,155 +326,63 @@ def reset_lane_timers(next_green_idx, prev_green_idx=None, reset_cycle=False):
 
 # -- MAIN PRIORITY UPDATE FUNCTION --
 def update_lane_priority(force_switch=False):
-    """
-    Updated priority system based on:
-    1. Emergency vehicles (highest priority)
-    2. Lanes with red time <= 15 seconds (first priority)
-    3. Lanes with higher vehicle count (secondary priority)
-    """
-    # Get current red timers for all lanes
-    lane_data = []
-    for i in range(LANE_COUNT):
-        lane_num = i + 1
-        lane_key = f'lane{lane_num}'
-        vehicles = st.session_state.traffic_data[lane_key]['vehicles']
-        emergency_vehicles = st.session_state.traffic_data[lane_key]['emergency_vehicles']
-        
-        # Calculate red time (total time minus current timer if not green)
-        current_light = st.session_state.traffic_states[lane_key]['light']
-        if current_light == 'red':
-            red_time_elapsed = RED_TIME - st.session_state.lane_timers[i]
-        else:
-            red_time_elapsed = RED_TIME  # If not red, consider full red time elapsed
-            
-        lane_data.append({
-            'lane_num': lane_num,
-            'lane_idx': i,
-            'vehicles': vehicles,
-            'emergency_vehicles': emergency_vehicles,
-            'red_time_elapsed': red_time_elapsed,
-            'has_emergency': emergency_vehicles > 0,
-            'needs_priority': red_time_elapsed >= (RED_TIME - 5)  # Red time <= 5 seconds remaining
-        })
-    
-    # Sort lanes by priority:
-    # 1. Emergency vehicles (highest priority)
-    # 2. Lanes with red time <= 15 seconds remaining
-    # 3. Vehicle count (descending)
-    # 4. Lane number (as tiebreaker)
-    def priority_key(lane):
-        return (
-            -lane['emergency_vehicles'],  # Emergency vehicles first (negative for descending)
-            -int(lane['needs_priority']),  # Lanes needing priority (red time <= 15s)
-            -lane['vehicles'],  # Vehicle count (descending)
-            lane['lane_num']  # Lane number as tiebreaker
-        )
-    
-    sorted_lanes = sorted(lane_data, key=priority_key)
-    st.session_state.priority_order = [lane['lane_num'] for lane in sorted_lanes]
-    
+    lane_vehicle_counts = [(i+1, st.session_state.traffic_data[f'lane{i+1}']['vehicles']) for i in range(LANE_COUNT)]
+    sorted_lanes = sorted(lane_vehicle_counts, key=lambda x: x[1], reverse=True)
+    st.session_state.priority_order = [lane for lane, _ in sorted_lanes]
     if not sorted_lanes:
         return
-    
     current_priority_lane = st.session_state.priority_lane
-    
     # Find lanes not used in this cycle
-    unused_lanes = [lane for lane in sorted_lanes if lane['lane_idx'] not in st.session_state.cycle_lanes_used]
-    
+    unused_lanes = [lane for lane, _ in sorted_lanes if (lane-1) not in st.session_state.cycle_lanes_used]
     if not unused_lanes:
-        # All lanes have had green, start new cycle with highest priority lane
-        next_priority_lane_data = sorted_lanes[0]
-        next_priority_lane = next_priority_lane_data['lane_num']
+        # All lanes have had green, start new cycle and re-evaluate priorities
+        next_priority_lane = sorted_lanes[0][0]
         prev_green_idx = current_priority_lane - 1 if current_priority_lane is not None else None
         reset_lane_timers(next_priority_lane-1, prev_green_idx, reset_cycle=True)
         st.session_state.priority_lane = next_priority_lane
-        
-        # Log priority reason
-        if next_priority_lane_data['has_emergency']:
-            logger.info(f" EMERGENCY: New cycle - Lane {next_priority_lane} has {next_priority_lane_data['emergency_vehicles']} emergency vehicle(s)")
-        elif next_priority_lane_data['needs_priority']:
-            logger.info(f"⏰ TIME PRIORITY: New cycle - Lane {next_priority_lane} red time <= 15s ({RED_TIME - next_priority_lane_data['red_time_elapsed']}s remaining)")
-        else:
-            logger.info(f"🚦 TRAFFIC PRIORITY: New cycle - Lane {next_priority_lane} has highest vehicle count ({next_priority_lane_data['vehicles']} vehicles)")
-        
+        logger.info(f"🚦 New cycle: Switched priority to Lane {next_priority_lane} (vehicles={sorted_lanes[0][1]})")
         send_green_signal(st.session_state.arduino, next_priority_lane)
     else:
         # Pick highest-priority unused lane
-        next_priority_lane_data = unused_lanes[0]
-        next_priority_lane = next_priority_lane_data['lane_num']
+        next_priority_lane = unused_lanes[0]
         prev_green_idx = current_priority_lane - 1 if current_priority_lane is not None else None
         reset_lane_timers(next_priority_lane-1, prev_green_idx)
         st.session_state.priority_lane = next_priority_lane
-        
-        # Log priority reason
-        if next_priority_lane_data['has_emergency']:
-            logger.info(f" EMERGENCY: Switched to Lane {next_priority_lane} - {next_priority_lane_data['emergency_vehicles']} emergency vehicle(s) detected!")
-        elif next_priority_lane_data['needs_priority']:
-            logger.info(f"⏰ TIME PRIORITY: Switched to Lane {next_priority_lane} - red time <= 15s ({RED_TIME - next_priority_lane_data['red_time_elapsed']}s remaining)")
-        else:
-            logger.info(f"🚦 TRAFFIC PRIORITY: Switched to Lane {next_priority_lane} - {next_priority_lane_data['vehicles']} vehicles detected")
-        
+        logger.info(f"🚦 Cycle: Switched priority to Lane {next_priority_lane} (vehicles={dict(sorted_lanes)[next_priority_lane]})")
         send_green_signal(st.session_state.arduino, next_priority_lane)
 
 # -- TIMER LOGIC AND AUTO-SWITCH --
 def auto_switch_lane():
     now = time.time()
     elapsed = now - st.session_state.last_timer_update
-    
-    # Update timer every 1 second for accurate countdown display
-    if elapsed >= 1.0:  
-        # decrement timers by 1 second for proper integer countdown
-        timer_changed = False
-        yellow_phase_started = False
-        lane_switched = False
-        
+    if elapsed >= 1.0:  # Update every 1 second for integer countdown
+        # decrement timers
         for i in range(LANE_COUNT):
             if st.session_state.lane_timers[i] > 0:
-                old_timer = st.session_state.lane_timers[i]
                 st.session_state.lane_timers[i] -= 1  # Decrease by 1 second
                 st.session_state.traffic_states[f'lane{i+1}']['timer'] = st.session_state.lane_timers[i]
-                timer_changed = True
-                
-                # Log countdown every 5 seconds
-                if int(st.session_state.lane_timers[i]) % 5 == 0:
+                # Only log every 5 seconds to reduce log spam
+                if st.session_state.lane_timers[i] % 5 == 0:
                     logger.info(f"Lane {i+1} countdown: {int(st.session_state.lane_timers[i])} sec remaining")
-        
         st.session_state.last_timer_update = now
 
-        # Check for yellow phase transition and lane switching
+        # Check for yellow phase transition (2 seconds before green ends)
         if st.session_state.priority_lane is not None:
             cur_idx = st.session_state.priority_lane - 1
             lane_num = st.session_state.priority_lane
-            
-            # Check for yellow phase (when timer equals YELLOW_TIME)
-            if st.session_state.lane_timers[cur_idx] == YELLOW_TIME and st.session_state.traffic_states[f'lane{lane_num}']['light'] != 'yellow':
-                # Start yellow phase - set timer to exactly YELLOW_TIME for proper countdown
+            if st.session_state.lane_timers[cur_idx] == YELLOW_TIME:
+                # Start yellow phase
                 st.session_state.traffic_states[f'lane{lane_num}']['light'] = 'yellow'
-                st.session_state.traffic_states[f'lane{lane_num}']['timer'] = YELLOW_TIME
-                st.session_state.in_yellow_phase = True
                 send_light_signal(st.session_state.arduino, lane_num, 'yellow')
                 logger.info(f"Lane {lane_num} entering YELLOW phase ({YELLOW_TIME}s)")
-                yellow_phase_started = True
-            
-            # Check for lane switch (when timer expires)
             elif st.session_state.lane_timers[cur_idx] <= 0:
                 # End of yellow, switch to next lane
-                st.session_state.in_yellow_phase = False
                 logger.info(f"Lane {lane_num} timer expired, switching lane.")
                 update_lane_priority(force_switch=True)
-                lane_switched = True
-        
-        return timer_changed, yellow_phase_started, lane_switched
-    
-    return False, False, False
 
-# -- Call auto-switch each rerun and handle selective reruns --
-timer_changed = False
-yellow_phase_started = False  
-lane_switched = False
-
+# -- Call auto-switch each rerun --
 if st.session_state.priority_lane is not None:
-    timer_changed, yellow_phase_started, lane_switched = auto_switch_lane()
+    auto_switch_lane()
 
 # --- Detection results area with countdown timers ---
 st.markdown("---")
@@ -632,14 +450,13 @@ for i in range(4):
         elif light_state == 'yellow':
             card_class = "detection-card yellow-light"
             status_text = "🟡 YELLOW"
-            phase_text = "⚠️ PREPARE TO STOP - ANALYZING TRAFFIC"
+            phase_text = "PREPARE TO STOP"
         else:
             card_class = "detection-card red-light"
             status_text = "🔴 RED"
             phase_text = "VEHICLES WAITING"
             
-        timer_value = max(0, int(st.session_state.lane_timers[i]))  # Display timer as whole number only
-        timer_display = f"{timer_value} sec"
+        timer_value = int(st.session_state.lane_timers[i])
         is_priority = st.session_state.priority_lane == lane_num
         
         st.markdown(f"""
@@ -648,7 +465,7 @@ for i in range(4):
             <p><strong>Vehicles:</strong> <span class="vehicle-count">{st.session_state.traffic_data[lane_key]['vehicles']}</span></p>
             <p><strong>Status:</strong> {status_text}</p>
             <p><strong>Phase:</strong> {phase_text}</p>
-            <p><strong>Time:</strong> <span class="timer-display">{timer_display}</span></p>
+            <p><strong>Time:</strong> <span class="timer-display">{timer_value} sec</span></p>
         </div>
         """, unsafe_allow_html=True)
         if f"annotated_image_{i}" in st.session_state and st.session_state[f"annotated_image_{i}"] is not None:
@@ -685,10 +502,6 @@ if st.session_state.priority_lane:
         """, unsafe_allow_html=True)
     if st.session_state.green_timer_active:
         st.info(f"⏱️ Green signal will automatically turn off after {GREEN_TIME} seconds")
-    
-    # Show yellow phase analysis status
-    if st.session_state.in_yellow_phase:
-        st.warning(f"🟡 YELLOW PHASE ACTIVE - System is re-analyzing traffic with fresh video frames for accurate vehicle count")
 else:
     st.warning("No lane has been analyzed yet. Click 'Analyze Traffic' to detect vehicles and set priority.")
 
@@ -703,26 +516,9 @@ else:
 if analyze_button:
     with st.spinner("Analyzing traffic in all lanes..."):
         analyze_traffic_and_update_priority()
-        st.rerun()
+        st.experimental_rerun()
 
-# --- Optimized rerun logic for better performance ---
-# Only rerun when necessary to improve timer responsiveness
+# --- Real-time rerun for timers, so lane switches are faster ---
 if st.session_state.priority_lane is not None and any(t > 0 for t in st.session_state.lane_timers):
-    current_time = time.time()
-    
-    if st.session_state.in_yellow_phase and yellow_phase_started:
-        # During yellow phase start, rerun model with new video frame
-        with st.spinner("🟡 Yellow phase: Re-analyzing traffic with fresh video frames..."):
-            analyze_traffic_and_update_priority(yellow_phase_analysis=True)
-        st.rerun()
-    elif lane_switched:
-        # When lane switches, full rerun to update everything
-        st.rerun()
-    elif timer_changed:
-        # For timer updates only, quick rerun with minimal delay
-        time.sleep(0.5)  # Half second sleep for smooth timer updates
-        st.rerun()
-    else:
-        # Fallback for any active timers
-        time.sleep(0.5)
-        st.rerun()
+    time.sleep(0.2)  # Moderate sleep time for good responsiveness
+    st.experimental_rerun()
