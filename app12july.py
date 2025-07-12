@@ -89,6 +89,18 @@ if 'video_total_frames' not in st.session_state:
         f'lane{i+1}': 0 for i in range(LANE_COUNT)
     }
 
+if 'next_priority_lane' not in st.session_state:
+    st.session_state.next_priority_lane = None
+
+# Reset session state if old structure is detected (for backward compatibility)
+if 'reset_session_for_priority_update' not in st.session_state:
+    # Clear any cached priority data to avoid KeyError with old structure
+    st.session_state.priority_lane = None
+    st.session_state.priority_order = list(range(1, LANE_COUNT+1))
+    st.session_state.cycle_lanes_used = set()
+    st.session_state.reset_session_for_priority_update = True
+    logger.info("Session state reset for priority system update compatibility")
+
 VEHICLE_CLASSES = {1, 2, 3, 5, 7}  # bicycle, car, motorcycle, bus, truck
 # YOLOv8s COCO classes - we'll detect by name since ambulance isn't a specific class
 # We'll look for 'truck', 'bus' or any vehicle with 'ambulance' in detection
@@ -419,7 +431,7 @@ def update_lane_priority(force_switch=False):
     """
     Updated priority system based on:
     1. Emergency vehicles (highest priority)
-    2. Lanes with red time <= 15 seconds (first priority)
+    2. Lanes with red time <= 5 seconds (first priority)
     3. Lanes with higher vehicle count (secondary priority)
     """
     # Get current red timers for all lanes
@@ -430,32 +442,32 @@ def update_lane_priority(force_switch=False):
         vehicles = st.session_state.traffic_data[lane_key]['vehicles']
         emergency_vehicles = st.session_state.traffic_data[lane_key]['emergency_vehicles']
         
-        # Calculate red time (total time minus current timer if not green)
+        # Calculate red time remaining
         current_light = st.session_state.traffic_states[lane_key]['light']
         if current_light == 'red':
-            red_time_elapsed = RED_TIME - st.session_state.lane_timers[i]
+            red_time_remaining = st.session_state.lane_timers[i]
         else:
-            red_time_elapsed = RED_TIME  # If not red, consider full red time elapsed
+            red_time_remaining = RED_TIME  # If not red, consider full red time remaining
             
         lane_data.append({
             'lane_num': lane_num,
             'lane_idx': i,
             'vehicles': vehicles,
             'emergency_vehicles': emergency_vehicles,
-            'red_time_elapsed': red_time_elapsed,
+            'red_time_remaining': red_time_remaining,
             'has_emergency': emergency_vehicles > 0,
-            'needs_priority': red_time_elapsed >= (RED_TIME - 5)  # Red time <= 5 seconds remaining
+            'needs_urgent_priority': red_time_remaining <= 5  # Red time <= 5 seconds remaining
         })
     
     # Sort lanes by priority:
     # 1. Emergency vehicles (highest priority)
-    # 2. Lanes with red time <= 15 seconds remaining
+    # 2. Lanes with red time <= 5 seconds remaining
     # 3. Vehicle count (descending)
     # 4. Lane number (as tiebreaker)
     def priority_key(lane):
         return (
             -lane['emergency_vehicles'],  # Emergency vehicles first (negative for descending)
-            -int(lane['needs_priority']),  # Lanes needing priority (red time <= 15s)
+            -int(lane['needs_urgent_priority']),  # Lanes needing urgent priority (red time <= 5s)
             -lane['vehicles'],  # Vehicle count (descending)
             lane['lane_num']  # Lane number as tiebreaker
         )
@@ -481,9 +493,9 @@ def update_lane_priority(force_switch=False):
         
         # Log priority reason
         if next_priority_lane_data['has_emergency']:
-            logger.info(f"� EMERGENCY: New cycle - Lane {next_priority_lane} has {next_priority_lane_data['emergency_vehicles']} emergency vehicle(s)")
-        elif next_priority_lane_data['needs_priority']:
-            logger.info(f"⏰ TIME PRIORITY: New cycle - Lane {next_priority_lane} red time <= 15s ({RED_TIME - next_priority_lane_data['red_time_elapsed']}s remaining)")
+            logger.info(f"🚨 EMERGENCY: New cycle - Lane {next_priority_lane} has {next_priority_lane_data['emergency_vehicles']} emergency vehicle(s)")
+        elif next_priority_lane_data['needs_urgent_priority']:
+            logger.info(f"⏰ URGENT TIME PRIORITY: New cycle - Lane {next_priority_lane} red time <= 5s ({next_priority_lane_data['red_time_remaining']}s remaining)")
         else:
             logger.info(f"🚦 TRAFFIC PRIORITY: New cycle - Lane {next_priority_lane} has highest vehicle count ({next_priority_lane_data['vehicles']} vehicles)")
         
@@ -498,13 +510,121 @@ def update_lane_priority(force_switch=False):
         
         # Log priority reason
         if next_priority_lane_data['has_emergency']:
-            logger.info(f"� EMERGENCY: Switched to Lane {next_priority_lane} - {next_priority_lane_data['emergency_vehicles']} emergency vehicle(s) detected!")
-        elif next_priority_lane_data['needs_priority']:
-            logger.info(f"⏰ TIME PRIORITY: Switched to Lane {next_priority_lane} - red time <= 15s ({RED_TIME - next_priority_lane_data['red_time_elapsed']}s remaining)")
+            logger.info(f"🚨 EMERGENCY: Switched to Lane {next_priority_lane} - {next_priority_lane_data['emergency_vehicles']} emergency vehicle(s) detected!")
+        elif next_priority_lane_data['needs_urgent_priority']:
+            logger.info(f"⏰ URGENT TIME PRIORITY: Switched to Lane {next_priority_lane} - red time <= 5s ({next_priority_lane_data['red_time_remaining']}s remaining)")
         else:
             logger.info(f"🚦 TRAFFIC PRIORITY: Switched to Lane {next_priority_lane} - {next_priority_lane_data['vehicles']} vehicles detected")
         
         send_green_signal(st.session_state.arduino, next_priority_lane)
+
+def start_next_lane_yellow_phase():
+    """
+    Start the yellow phase for the next priority lane (overlapping with current lane's yellow)
+    """
+    if st.session_state.priority_lane is None:
+        return
+    
+    # Determine next priority lane using the same logic as update_lane_priority
+    lane_data = []
+    for i in range(LANE_COUNT):
+        lane_num = i + 1
+        lane_key = f'lane{lane_num}'
+        vehicles = st.session_state.traffic_data[lane_key]['vehicles']
+        emergency_vehicles = st.session_state.traffic_data[lane_key]['emergency_vehicles']
+        
+        # Calculate red time remaining
+        current_light = st.session_state.traffic_states[lane_key]['light']
+        if current_light == 'red':
+            red_time_remaining = st.session_state.lane_timers[i]
+        else:
+            red_time_remaining = RED_TIME
+            
+        lane_data.append({
+            'lane_num': lane_num,
+            'lane_idx': i,
+            'vehicles': vehicles,
+            'emergency_vehicles': emergency_vehicles,
+            'red_time_remaining': red_time_remaining,
+            'has_emergency': emergency_vehicles > 0,
+            'needs_urgent_priority': red_time_remaining <= 5
+        })
+    
+    # Sort by priority
+    def priority_key(lane):
+        return (
+            -lane['emergency_vehicles'],
+            -int(lane['needs_urgent_priority']),
+            -lane['vehicles'],
+            lane['lane_num']
+        )
+    
+    sorted_lanes = sorted(lane_data, key=priority_key)
+    
+    # Find unused lanes
+    unused_lanes = [lane for lane in sorted_lanes if lane['lane_idx'] not in st.session_state.cycle_lanes_used]
+    
+    if not unused_lanes:
+        # All lanes used, start new cycle
+        next_lane_data = sorted_lanes[0]
+        next_lane_num = next_lane_data['lane_num']
+        next_lane_idx = next_lane_num - 1
+        st.session_state.cycle_lanes_used = set()  # Reset cycle
+    else:
+        # Use highest priority unused lane
+        next_lane_data = unused_lanes[0]
+        next_lane_num = next_lane_data['lane_num']
+        next_lane_idx = next_lane_num - 1
+    
+    # Set next lane to yellow phase (3 seconds)
+    st.session_state.lane_timers[next_lane_idx] = 3
+    st.session_state.traffic_states[f'lane{next_lane_num}']['light'] = 'yellow'
+    st.session_state.traffic_states[f'lane{next_lane_num}']['timer'] = 3
+    send_light_signal(st.session_state.arduino, next_lane_num, 'yellow')
+    
+    # Store the next lane for completion
+    st.session_state.next_priority_lane = next_lane_num
+    
+    logger.info(f"🟡 OVERLAP YELLOW: Lane {next_lane_num} starting 3s yellow phase (overlapping)")
+
+def complete_lane_switch():
+    """
+    Complete the lane switch by setting the next lane to green and current to red
+    """
+    if not hasattr(st.session_state, 'next_priority_lane') or st.session_state.next_priority_lane is None:
+        # Fallback to old method if next lane not set
+        update_lane_priority(force_switch=True)
+        return
+    
+    current_lane = st.session_state.priority_lane
+    next_lane = st.session_state.next_priority_lane
+    
+    if current_lane is not None:
+        # Set current lane to red
+        current_idx = current_lane - 1
+        st.session_state.lane_timers[current_idx] = RED_TIME
+        st.session_state.traffic_states[f'lane{current_lane}']['light'] = 'red'
+        st.session_state.traffic_states[f'lane{current_lane}']['timer'] = RED_TIME
+        send_light_signal(st.session_state.arduino, current_lane, 'red')
+    
+    # Set next lane to green
+    next_idx = next_lane - 1
+    st.session_state.lane_timers[next_idx] = GREEN_TIME
+    st.session_state.traffic_states[f'lane{next_lane}']['light'] = 'green'
+    st.session_state.traffic_states[f'lane{next_lane}']['timer'] = GREEN_TIME
+    send_light_signal(st.session_state.arduino, next_lane, 'green')
+    
+    # Update priority lane and cycle tracking
+    st.session_state.priority_lane = next_lane
+    st.session_state.cycle_lanes_used.add(next_idx)
+    
+    # Clear next lane reference
+    st.session_state.next_priority_lane = None
+    
+    # Send green signal to Arduino
+    send_green_signal(st.session_state.arduino, next_lane)
+    
+    logger.info(f"🚦 LANE SWITCH COMPLETE: Lane {current_lane} → Lane {next_lane} (overlapping yellow transition)")
 
 # -- TIMER LOGIC AND AUTO-SWITCH --
 def auto_switch_lane():
@@ -546,12 +666,19 @@ def auto_switch_lane():
                 logger.info(f"Lane {lane_num} entering YELLOW phase ({YELLOW_TIME}s)")
                 yellow_phase_started = True
             
+            # Check for overlapping yellow phase (3 seconds before current yellow ends)
+            elif (st.session_state.lane_timers[cur_idx] == 3 and 
+                  st.session_state.traffic_states[f'lane{lane_num}']['light'] == 'yellow'):
+                # Start next lane's yellow phase (overlapping)
+                start_next_lane_yellow_phase()
+                logger.info(f"🟡 OVERLAP: Starting next lane's yellow phase (3s overlap)")
+            
             # Check for lane switch (when timer expires)
             elif st.session_state.lane_timers[cur_idx] <= 0:
-                # End of yellow, switch to next lane
+                # End of yellow, switch to next lane (which should already be in yellow)
                 st.session_state.in_yellow_phase = False
                 logger.info(f"Lane {lane_num} timer expired, switching lane.")
-                update_lane_priority(force_switch=True)
+                complete_lane_switch()
                 lane_switched = True
         
         return timer_changed, yellow_phase_started, lane_switched
@@ -632,7 +759,13 @@ for i in range(4):
         elif light_state == 'yellow':
             card_class = "detection-card yellow-light"
             status_text = "🟡 YELLOW"
-            phase_text = "⚠️ PREPARE TO STOP - ANALYZING TRAFFIC"
+            # Check if this is an overlapping yellow phase
+            if (st.session_state.priority_lane != lane_num and 
+                hasattr(st.session_state, 'next_priority_lane') and 
+                st.session_state.next_priority_lane == lane_num):
+                phase_text = "⚠️ OVERLAP YELLOW - PREPARING FOR GREEN"
+            else:
+                phase_text = "⚠️ PREPARE TO STOP - ANALYZING TRAFFIC"
         else:
             card_class = "detection-card red-light"
             status_text = "🔴 RED"
@@ -688,7 +821,13 @@ if st.session_state.priority_lane:
     
     # Show yellow phase analysis status
     if st.session_state.in_yellow_phase:
-        st.warning(f"🟡 YELLOW PHASE ACTIVE - System is re-analyzing traffic with fresh video frames for accurate vehicle count")
+        current_lane = st.session_state.priority_lane
+        if (hasattr(st.session_state, 'next_priority_lane') and 
+            st.session_state.next_priority_lane is not None):
+            next_lane = st.session_state.next_priority_lane
+            st.warning(f"🟡 OVERLAPPING YELLOW PHASE - Lane {current_lane} finishing yellow, Lane {next_lane} starting yellow (3s overlap)")
+        else:
+            st.warning(f"🟡 YELLOW PHASE ACTIVE - System is re-analyzing traffic with fresh video frames for accurate vehicle count")
 else:
     st.warning("No lane has been analyzed yet. Click 'Analyze Traffic' to detect vehicles and set priority.")
 

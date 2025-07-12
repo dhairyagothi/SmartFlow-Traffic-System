@@ -1,7 +1,7 @@
 {
-  "green_time": 15,
+  "green_time": 10,
   "yellow_time": 5,
-  "red_time": 75,
+  "red_time": 59,
   "lane_count": 4,
   "confidence_threshold": 0.5,
   "emergency_detection": true,
