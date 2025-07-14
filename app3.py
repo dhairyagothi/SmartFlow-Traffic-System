@@ -15,7 +15,7 @@ import threading
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("SmartTraffic")
 
-st.set_page_config(page_title="Smart Traffic System", page_icon="🚦", layout="wide")
+st.set_page_config(page_title="SmartFlow Traffic System", page_icon="🚦", layout="wide")
 
 current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 st.markdown(f"**Current Date and Time:** {current_time}")
@@ -354,7 +354,7 @@ atexit.register(cleanup_temp_files)
 if 'arduino' not in st.session_state:
     st.session_state.arduino = initialize_arduino()
 
-st.title("🚦 Smart Traffic Management System")
+st.title("🚦 SmartFlow Traffic Management System")
 
 col1, col2, col3 = st.columns([1, 2, 1])
 with col2:
