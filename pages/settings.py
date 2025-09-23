@@ -384,7 +384,7 @@ info_col1, info_col2 = st.columns(2)
 
 with info_col1:
     st.subheader("Software Version")
-    st.info("SmartFlow Traffic System v3.0")
+    st.info("Gati - Guided Automated Traffic Intelligence v3.0")
     st.info("YOLOv8 Model Support: ✅")
     st.info("Arduino Integration: ✅")
     st.info("Real-time Analytics: ✅")

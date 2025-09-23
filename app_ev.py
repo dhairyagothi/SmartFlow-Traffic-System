@@ -15,7 +15,7 @@ import threading
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("SmartTraffic")
 
-st.set_page_config(page_title="Gati - Guided Automated Traffic Intelligence", page_icon="🚦", layout="wide")
+st.set_page_config(page_title="SmartFlow Traffic System", page_icon="🚦", layout="wide")
 
 current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 st.markdown(f"**Current Date and Time:** {current_time}")
@@ -101,21 +101,28 @@ if 'reset_session_for_priority_update' not in st.session_state:
     st.session_state.reset_session_for_priority_update = True
     logger.info("Session state reset for priority system update compatibility")
 
-VEHICLE_CLASSES = {1, 2, 3, 5, 7}  # bicycle, car, motorcycle, bus, truck
-# YOLOv8s COCO classes - we'll detect by name since ambulance isn't a specific class
-# We'll look for 'truck', 'bus' or any vehicle with 'ambulance' in detection
-EMERGENCY_CLASSES = set()  # Will detect by name matching
+VEHICLE_CLASSES = {1, 2, 3, 5, 7}  # bicycle, car, motorcycle, bus, truck (COCO classes)
+# Emergency vehicle class from custom trained model
+EMERGENCY_CLASSES = {0}  # emergency_vehicle class from yolov8s_ev.pt
 
 @st.cache_resource
 def load_model():
     try:
         from ultralytics import YOLO
-        model = YOLO("yolov8s.pt")
-        logger.info("YOLOv8 model loaded successfully")
+        # Load the custom emergency vehicle model
+        model = YOLO("yolov8s_ev.pt")
+        logger.info("YOLOv8s Emergency Vehicle model loaded successfully")
         return model
     except Exception as e:
-        logger.error(f"Failed to load model: {str(e)}")
-        return None
+        logger.error(f"Failed to load emergency vehicle model: {str(e)}")
+        logger.info("Falling back to standard YOLOv8s model...")
+        try:
+            model = YOLO("yolov8s.pt")
+            logger.info("Standard YOLOv8s model loaded as fallback")
+            return model
+        except Exception as e2:
+            logger.error(f"Failed to load fallback model: {str(e2)}")
+            return None
 
 def save_uploaded_file(uploaded_file):
     try:
@@ -135,6 +142,8 @@ def detect_vehicles(image_array, model):
         
         for box in results.boxes:
             cls_id = int(box.cls[0])
+            
+            # Check for regular vehicles (COCO classes)
             if cls_id in VEHICLE_CLASSES:
                 count += 1
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
@@ -144,18 +153,37 @@ def detect_vehicles(image_array, model):
                 label = f"{cls_name} {conf:.2f}"
                 cv2.putText(annotated_img, label, (x1, y1-10), 
                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
-                
-                # Backend: Check for emergency vehicles (not shown in frontend)
-                # Look for keywords that might indicate emergency vehicles
+            
+            # Check for emergency vehicles (custom trained class)
+            elif cls_id in EMERGENCY_CLASSES:
+                count += 1  # Count as regular vehicle too
+                emergency_count += 1
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                # Use red rectangle for emergency vehicles
+                cv2.rectangle(annotated_img, (x1, y1), (x2, y2), (0, 0, 255), 3)
+                cls_name = model.names[cls_id]
+                conf = float(box.conf[0])
+                label = f"🚨 {cls_name} {conf:.2f}"
+                cv2.putText(annotated_img, label, (x1, y1-10), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                logger.info(f"Emergency vehicle detected: {cls_name} (confidence: {conf:.2f})")
+            
+            # Fallback: Check for emergency keywords in COCO class names (for backward compatibility)
+            elif cls_id in VEHICLE_CLASSES:
+                cls_name = model.names[cls_id]
                 emergency_keywords = ['ambulance', 'emergency', 'rescue', 'fire truck', 'police']
                 is_emergency = any(keyword in cls_name.lower() for keyword in emergency_keywords)
                 
-                # For testing: uncomment next line to treat trucks/buses as emergency vehicles
-                # is_emergency = is_emergency or cls_name.lower() in ['truck', 'bus']
-                
                 if is_emergency:
+                    count += 1
                     emergency_count += 1
-                    logger.info(f"Emergency vehicle detected: {cls_name}")
+                    x1, y1, x2, y2 = map(int, box.xyxy[0])
+                    cv2.rectangle(annotated_img, (x1, y1), (x2, y2), (0, 0, 255), 3)
+                    conf = float(box.conf[0])
+                    label = f"🚨 {cls_name} {conf:.2f}"
+                    cv2.putText(annotated_img, label, (x1, y1-10), 
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                    logger.info(f"Emergency vehicle detected (keyword match): {cls_name}")
         
         return count, emergency_count, annotated_img
     except Exception as e:
@@ -282,10 +310,6 @@ def analyze_traffic_and_update_priority(yellow_phase_analysis=False):
         st.error("Failed to load detection model. Please check your installation.")
         return
     
-    # During yellow phase, capture fresh frames from ALL video lanes simultaneously
-    if yellow_phase_analysis:
-        logger.info("🟡 YELLOW PHASE: Capturing fresh frames from ALL video lanes for updated analysis")
-    
     for i in range(LANE_COUNT):
         lane_key = f'lane{i+1}'
         lane_data = st.session_state.traffic_data[lane_key]
@@ -295,7 +319,6 @@ def analyze_traffic_and_update_priority(yellow_phase_analysis=False):
             try:
                 img_array = None
                 if file_type == "image":
-                    # For images, always use the same image (no frame advancement needed)
                     file.seek(0)
                     image = Image.open(file).convert("RGB")
                     img_array = np.array(image)
@@ -303,7 +326,7 @@ def analyze_traffic_and_update_priority(yellow_phase_analysis=False):
                     video_path = st.session_state.temp_video_paths[lane_key]
                     if video_path:
                         if yellow_phase_analysis:
-                            # YELLOW PHASE: Advance to next frame for ALL video lanes (not just current priority lane)
+                            # During yellow phase, advance to next frame for fresh analysis
                             current_pos = st.session_state.video_frame_positions.get(lane_key, 0)
                             frame_result = extract_video_frame(video_path, current_pos, advance_frames=True)
                             if frame_result and len(frame_result) == 3:
@@ -311,7 +334,7 @@ def analyze_traffic_and_update_priority(yellow_phase_analysis=False):
                                 # Update position and total frames for this lane
                                 st.session_state.video_frame_positions[lane_key] = new_pos
                                 st.session_state.video_total_frames[lane_key] = total_frames
-                                logger.info(f"🟡 Yellow Phase: Lane {i+1} - Advanced to fresh frame {new_pos}/{total_frames}")
+                                logger.info(f"Yellow Phase: Lane {i+1} - Advanced to frame {new_pos}/{total_frames}")
                             else:
                                 logger.warning(f"Failed to extract yellow phase frame for Lane {i+1}")
                         else:
@@ -334,17 +357,11 @@ def analyze_traffic_and_update_priority(yellow_phase_analysis=False):
                     if yellow_phase_analysis:
                         current_frame = st.session_state.video_frame_positions.get(lane_key, 0)
                         total_frames = st.session_state.video_total_frames.get(lane_key, 0)
-                        logger.info(f"🟡 Lane {i+1}: Fresh capture - Detected {count} vehicles, {emergency_count} emergency vehicles (Yellow Phase - Frame {current_frame}/{total_frames})")
+                        logger.info(f"Lane {i+1}: Detected {count} vehicles, {emergency_count} emergency vehicles (Yellow Phase - Frame {current_frame}/{total_frames})")
                     else:
                         logger.info(f"Lane {i+1}: Detected {count} vehicles, {emergency_count} emergency vehicles (Initial Analysis)")
             except Exception as e:
                 logger.error(f"Error processing Lane {i+1}: {str(e)}")
-    
-    # Log summary for yellow phase analysis
-    if yellow_phase_analysis:
-        total_vehicles_all_lanes = sum(st.session_state.traffic_data[f'lane{i+1}']['vehicles'] for i in range(LANE_COUNT))
-        total_emergency_all_lanes = sum(st.session_state.traffic_data[f'lane{i+1}']['emergency_vehicles'] for i in range(LANE_COUNT))
-        logger.info(f"🟡 YELLOW PHASE COMPLETE: Fresh analysis of all {LANE_COUNT} lanes - Total: {total_vehicles_all_lanes} vehicles, {total_emergency_all_lanes} emergency vehicles")
     
     # Update lane priorities after detection
     if not yellow_phase_analysis:
@@ -365,7 +382,8 @@ atexit.register(cleanup_temp_files)
 if 'arduino' not in st.session_state:
     st.session_state.arduino = initialize_arduino()
 
-st.title("🚦 Gati - Guided Automated Traffic Intelligence")
+st.title("🚦 SmartFlow Traffic Management System")
+st.markdown("**🚨 Emergency Vehicle Detection:** Using custom-trained YOLOv8s model (yolov8s_ev.pt)")
 
 col1, col2, col3 = st.columns([1, 2, 1])
 with col2:
@@ -390,7 +408,7 @@ with st.container():
                         st.session_state.traffic_data[lane_key]['file'] = uploaded_file
                         st.session_state.traffic_data[lane_key]['file_type'] = "image"
                         image = Image.open(uploaded_file).convert("RGB")
-                        st.image(image, caption=f"Lane {lane_num} Image", use_column_width=True)
+                        st.image(image, caption=f"Lane {lane_num} Image", use_container_width=True)
                 else:
                     uploaded_file = st.file_uploader(f"Upload video for Lane {lane_num}", 
                                                 type=["mp4", "avi", "mov", "mkv"], 
@@ -785,46 +803,49 @@ for i in range(4):
         
         st.markdown(f"""
         <div class="{card_class}">
-            <div class="lane-title"> Lane {lane_num} {'  PRIORITY' if is_priority else ''}</div>
+            <div class="lane-title"> Lane {lane_num} {'🚨 EMERGENCY PRIORITY' if is_priority and st.session_state.traffic_data[lane_key]['emergency_vehicles'] > 0 else '  PRIORITY' if is_priority else ''}</div>
             <p><strong>Vehicles:</strong> <span class="vehicle-count">{st.session_state.traffic_data[lane_key]['vehicles']}</span></p>
+            <p><strong>🚨 Emergency:</strong> <span style="color: red; font-weight: bold;">{st.session_state.traffic_data[lane_key]['emergency_vehicles']}</span></p>
             <p><strong>Status:</strong> {status_text}</p>
             <p><strong>Phase:</strong> {phase_text}</p>
             <p><strong>Time:</strong> <span class="timer-display">{timer_display}</span></p>
         </div>
         """, unsafe_allow_html=True)
         if f"annotated_image_{i}" in st.session_state and st.session_state[f"annotated_image_{i}"] is not None:
+            emergency_text = f", {st.session_state.traffic_data[lane_key]['emergency_vehicles']} emergency" if st.session_state.traffic_data[lane_key]['emergency_vehicles'] > 0 else ""
             st.image(
                 st.session_state[f"annotated_image_{i}"],
-                caption=f"Lane {lane_num}: {st.session_state.traffic_data[lane_key]['vehicles']} vehicles detected",
-                use_column_width=True
+                caption=f"Lane {lane_num}: {st.session_state.traffic_data[lane_key]['vehicles']} vehicles detected{emergency_text}",
+                use_container_width=True
             )
             # Show captured frame below analyzed image
             if f"captured_frame_{i}" in st.session_state and st.session_state[f"captured_frame_{i}"] is not None:
                 st.image(
                     st.session_state[f"captured_frame_{i}"],
                     caption=f"Lane {lane_num}: Original captured frame",
-                    use_column_width=True
+                    use_container_width=True
                 )
 
 # --- Visualization ---
 st.markdown("---")
 st.subheader("Lane Priority Visualization")
 if st.session_state.priority_lane:
-    lane_priorities = [(lane, st.session_state.traffic_data[f'lane{lane}']['vehicles']) 
+    lane_priorities = [(lane, st.session_state.traffic_data[f'lane{lane}']['vehicles'], st.session_state.traffic_data[f'lane{lane}']['emergency_vehicles']) 
         for lane in st.session_state.priority_order]
-    labels = [f"Lane {lane}" for lane, _ in lane_priorities]
-    values = [count for _, count in lane_priorities]
+    labels = [f"Lane {lane}" for lane, _, _ in lane_priorities]
+    values = [count for _, count, _ in lane_priorities]
     priority_lane = st.session_state.priority_lane
     max_count = max(values) if values else 1
-    for rank, (lane, count) in enumerate(lane_priorities, 1):
+    for rank, (lane, count, emergency_count) in enumerate(lane_priorities, 1):
         bar_width = int(100 * count / max_count) if max_count > 0 else 0
         bar_color = "#4CAF50" if lane == priority_lane else "#F44336"
+        emergency_indicator = " 🚨" if emergency_count > 0 else ""
         st.markdown(f"""
         <div style="margin-bottom: 10px; display: flex; align-items: center;">
-            <div style="width: 80px; text-align: center; margin-right: 10px;">Lane {lane}</div>
+            <div style="width: 80px; text-align: center; margin-right: 10px;">Lane {lane}{emergency_indicator}</div>
             <div style="width: {bar_width}%; background-color: {bar_color}; height: 30px; 
                  display: flex; align-items: center; padding-left: 10px; color: white;">
-                {count} vehicles
+                {count} vehicles{f', {emergency_count} emergency' if emergency_count > 0 else ''}
             </div>
             <div style="margin-left: 10px;">
                 {' 🟢 GREEN (Active)' if lane == priority_lane else ' 🟡 YELLOW' if st.session_state.traffic_states[f'lane{lane}']['light'] == 'yellow' else ' 🔴 RED'}
@@ -841,19 +862,37 @@ if st.session_state.priority_lane:
             st.session_state.next_priority_lane is not None):
             next_lane = st.session_state.next_priority_lane
             st.warning(f"🟡 OVERLAPPING YELLOW PHASE - Lane {current_lane} finishing yellow, Lane {next_lane} starting yellow (3s overlap)")
-            st.info(f"📹 FRESH CAPTURE: System is capturing new frames from ALL 4 video lanes for real-time traffic analysis")
         else:
-            st.warning(f"🟡 YELLOW PHASE ACTIVE - System is capturing fresh frames from ALL video lanes for accurate vehicle count")
+            st.warning(f"🟡 YELLOW PHASE ACTIVE - System is re-analyzing traffic with fresh video frames for accurate vehicle count")
 else:
     st.warning("No lane has been analyzed yet. Click 'Analyze Traffic' to detect vehicles and set priority.")
 
 # --- Arduino status ---
 st.markdown("---")
-st.subheader("Arduino Status")
-if st.session_state.arduino and st.session_state.arduino.is_open:
-    st.success("✅ Arduino Connected - Ready to send signals to traffic lights")
-else:
-    st.error("❌ Arduino Not Connected - Cannot send signals")
+st.subheader("System Status")
+
+# Model status
+col1, col2 = st.columns(2)
+with col1:
+    st.markdown("**🤖 Detection Model:**")
+    model = load_model()
+    if model:
+        model_path = getattr(model, 'ckpt_path', 'Unknown')
+        if 'yolov8s_ev.pt' in str(model_path):
+            st.success("✅ Emergency Vehicle Model (yolov8s_ev.pt) - Custom trained for emergency detection")
+        elif 'yolov8s.pt' in str(model_path):
+            st.warning("⚠️ Standard YOLOv8s Model - Limited emergency detection via keywords")
+        else:
+            st.info(f"ℹ️ Model loaded: {model_path}")
+    else:
+        st.error("❌ No model loaded")
+
+with col2:
+    st.markdown("**🔌 Arduino Connection:**")
+    if st.session_state.arduino and st.session_state.arduino.is_open:
+        st.success("✅ Arduino Connected - Ready to send signals")
+    else:
+        st.error("❌ Arduino Not Connected - Cannot send signals")
 
 if analyze_button:
     with st.spinner("Analyzing traffic in all lanes..."):
@@ -866,8 +905,8 @@ if st.session_state.priority_lane is not None and any(t > 0 for t in st.session_
     current_time = time.time()
     
     if st.session_state.in_yellow_phase and yellow_phase_started:
-        # During yellow phase start, rerun model with fresh frames from ALL video lanes
-        with st.spinner("🟡 Yellow phase: Capturing fresh frames from ALL video lanes for updated traffic analysis..."):
+        # During yellow phase start, rerun model with new video frame
+        with st.spinner("🟡 Yellow phase: Re-analyzing traffic with fresh video frames..."):
             analyze_traffic_and_update_priority(yellow_phase_analysis=True)
         st.rerun()
     elif lane_switched:

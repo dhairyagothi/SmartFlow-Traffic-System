@@ -15,7 +15,7 @@ import threading
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger("SmartTraffic")
 
-st.set_page_config(page_title="SmartFlow Traffic System", page_icon="🚦", layout="wide")
+st.set_page_config(page_title="Gati - Guided Automated Traffic Intelligence", page_icon="🚦", layout="wide")
 
 current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 st.markdown(f"**Current Date and Time:** {current_time}")
@@ -282,6 +282,10 @@ def analyze_traffic_and_update_priority(yellow_phase_analysis=False):
         st.error("Failed to load detection model. Please check your installation.")
         return
     
+    # During yellow phase, capture fresh frames from ALL video lanes simultaneously
+    if yellow_phase_analysis:
+        logger.info("🟡 YELLOW PHASE: Capturing fresh frames from ALL video lanes for updated analysis")
+    
     for i in range(LANE_COUNT):
         lane_key = f'lane{i+1}'
         lane_data = st.session_state.traffic_data[lane_key]
@@ -291,6 +295,7 @@ def analyze_traffic_and_update_priority(yellow_phase_analysis=False):
             try:
                 img_array = None
                 if file_type == "image":
+                    # For images, always use the same image (no frame advancement needed)
                     file.seek(0)
                     image = Image.open(file).convert("RGB")
                     img_array = np.array(image)
@@ -298,7 +303,7 @@ def analyze_traffic_and_update_priority(yellow_phase_analysis=False):
                     video_path = st.session_state.temp_video_paths[lane_key]
                     if video_path:
                         if yellow_phase_analysis:
-                            # During yellow phase, advance to next frame for fresh analysis
+                            # YELLOW PHASE: Advance to next frame for ALL video lanes (not just current priority lane)
                             current_pos = st.session_state.video_frame_positions.get(lane_key, 0)
                             frame_result = extract_video_frame(video_path, current_pos, advance_frames=True)
                             if frame_result and len(frame_result) == 3:
@@ -306,7 +311,7 @@ def analyze_traffic_and_update_priority(yellow_phase_analysis=False):
                                 # Update position and total frames for this lane
                                 st.session_state.video_frame_positions[lane_key] = new_pos
                                 st.session_state.video_total_frames[lane_key] = total_frames
-                                logger.info(f"Yellow Phase: Lane {i+1} - Advanced to frame {new_pos}/{total_frames}")
+                                logger.info(f"🟡 Yellow Phase: Lane {i+1} - Advanced to fresh frame {new_pos}/{total_frames}")
                             else:
                                 logger.warning(f"Failed to extract yellow phase frame for Lane {i+1}")
                         else:
@@ -329,11 +334,17 @@ def analyze_traffic_and_update_priority(yellow_phase_analysis=False):
                     if yellow_phase_analysis:
                         current_frame = st.session_state.video_frame_positions.get(lane_key, 0)
                         total_frames = st.session_state.video_total_frames.get(lane_key, 0)
-                        logger.info(f"Lane {i+1}: Detected {count} vehicles, {emergency_count} emergency vehicles (Yellow Phase - Frame {current_frame}/{total_frames})")
+                        logger.info(f"🟡 Lane {i+1}: Fresh capture - Detected {count} vehicles, {emergency_count} emergency vehicles (Yellow Phase - Frame {current_frame}/{total_frames})")
                     else:
                         logger.info(f"Lane {i+1}: Detected {count} vehicles, {emergency_count} emergency vehicles (Initial Analysis)")
             except Exception as e:
                 logger.error(f"Error processing Lane {i+1}: {str(e)}")
+    
+    # Log summary for yellow phase analysis
+    if yellow_phase_analysis:
+        total_vehicles_all_lanes = sum(st.session_state.traffic_data[f'lane{i+1}']['vehicles'] for i in range(LANE_COUNT))
+        total_emergency_all_lanes = sum(st.session_state.traffic_data[f'lane{i+1}']['emergency_vehicles'] for i in range(LANE_COUNT))
+        logger.info(f"🟡 YELLOW PHASE COMPLETE: Fresh analysis of all {LANE_COUNT} lanes - Total: {total_vehicles_all_lanes} vehicles, {total_emergency_all_lanes} emergency vehicles")
     
     # Update lane priorities after detection
     if not yellow_phase_analysis:
@@ -354,7 +365,7 @@ atexit.register(cleanup_temp_files)
 if 'arduino' not in st.session_state:
     st.session_state.arduino = initialize_arduino()
 
-st.title("🚦 SmartFlow Traffic Management System")
+st.title("🚦 Gati - Guided Automated Traffic Intelligence")
 
 col1, col2, col3 = st.columns([1, 2, 1])
 with col2:
@@ -379,7 +390,7 @@ with st.container():
                         st.session_state.traffic_data[lane_key]['file'] = uploaded_file
                         st.session_state.traffic_data[lane_key]['file_type'] = "image"
                         image = Image.open(uploaded_file).convert("RGB")
-                        st.image(image, caption=f"Lane {lane_num} Image", use_container_width=True)
+                        st.image(image, caption=f"Lane {lane_num} Image", use_column_width=True)
                 else:
                     uploaded_file = st.file_uploader(f"Upload video for Lane {lane_num}", 
                                                 type=["mp4", "avi", "mov", "mkv"], 
@@ -785,14 +796,14 @@ for i in range(4):
             st.image(
                 st.session_state[f"annotated_image_{i}"],
                 caption=f"Lane {lane_num}: {st.session_state.traffic_data[lane_key]['vehicles']} vehicles detected",
-                use_container_width=True
+                use_column_width=True
             )
             # Show captured frame below analyzed image
             if f"captured_frame_{i}" in st.session_state and st.session_state[f"captured_frame_{i}"] is not None:
                 st.image(
                     st.session_state[f"captured_frame_{i}"],
                     caption=f"Lane {lane_num}: Original captured frame",
-                    use_container_width=True
+                    use_column_width=True
                 )
 
 # --- Visualization ---
@@ -830,8 +841,9 @@ if st.session_state.priority_lane:
             st.session_state.next_priority_lane is not None):
             next_lane = st.session_state.next_priority_lane
             st.warning(f"🟡 OVERLAPPING YELLOW PHASE - Lane {current_lane} finishing yellow, Lane {next_lane} starting yellow (3s overlap)")
+            st.info(f"📹 FRESH CAPTURE: System is capturing new frames from ALL 4 video lanes for real-time traffic analysis")
         else:
-            st.warning(f"🟡 YELLOW PHASE ACTIVE - System is re-analyzing traffic with fresh video frames for accurate vehicle count")
+            st.warning(f"🟡 YELLOW PHASE ACTIVE - System is capturing fresh frames from ALL video lanes for accurate vehicle count")
 else:
     st.warning("No lane has been analyzed yet. Click 'Analyze Traffic' to detect vehicles and set priority.")
 
@@ -839,7 +851,7 @@ else:
 st.markdown("---")
 st.subheader("Arduino Status")
 if st.session_state.arduino and st.session_state.arduino.is_open:
-    st.success("✅ Arduino Connected - Ready to send signals to pin 9")
+    st.success("✅ Arduino Connected - Ready to send signals to traffic lights")
 else:
     st.error("❌ Arduino Not Connected - Cannot send signals")
 
@@ -854,8 +866,8 @@ if st.session_state.priority_lane is not None and any(t > 0 for t in st.session_
     current_time = time.time()
     
     if st.session_state.in_yellow_phase and yellow_phase_started:
-        # During yellow phase start, rerun model with new video frame
-        with st.spinner("🟡 Yellow phase: Re-analyzing traffic with fresh video frames..."):
+        # During yellow phase start, rerun model with fresh frames from ALL video lanes
+        with st.spinner("🟡 Yellow phase: Capturing fresh frames from ALL video lanes for updated traffic analysis..."):
             analyze_traffic_and_update_priority(yellow_phase_analysis=True)
         st.rerun()
     elif lane_switched:

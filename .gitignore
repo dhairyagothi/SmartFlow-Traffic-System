@@ -5,7 +5,7 @@ __pycache__/
 
 # C extensions
 *.so
-
+emergency_vehicle_training
 # Distribution / packaging
 .Python
 build/
@@ -172,3 +172,6 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+yolov8n.pt
+yolov8s_ev.pt
+yolov8s.pt
